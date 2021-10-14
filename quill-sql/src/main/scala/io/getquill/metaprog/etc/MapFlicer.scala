@@ -12,6 +12,8 @@ import scala.quoted._
 import io.getquill.context.LiftMacro
 import io.getquill.metaprog.TypeExtensions._
 import io.getquill.generic.ConstructType
+import io.getquill.generic.DeconstructElaboratedEntityLevels
+import io.getquill.generic.ElaborateStructure.{ TermType, Leaf, Branch }
 
 
 object ColumnsFlicer {
@@ -49,6 +51,7 @@ class ColumnsFlicerMacro {
           val rec = recurse[T, PrepareRow, Session, fields, types](id, Type.of[fields], Type.of[types])(columns)(using baseType)
           expr +: rec
         else
+          // TODO Recursive delving for optional product types
           // inner class construct e.g. case class Person(name: Name, age: Int),  case class Name(first: String, last: String)
           // so this property would be p.name in a query query[Person].map(p => Person(Name({p.name}.first, {p.name}.last), ...)
           val subMapping = base[tpe, PrepareRow, Session](childTTerm, columns)
@@ -100,25 +103,57 @@ class MapFlicerMacro {
     import quotes.reflect._
     TypeRepr.of(using tpe) <:< TypeRepr.of[Product]
 
+  // TODO Same thing happening in UdtEncodingMacro. Need to abstract these methods
+  // def checkValidProduct[T: Type] =
+  //   // First double check what the fields of the type are for diagnostic purposes.
+  //   val mirrorFields = MirrorFields.of[T]
+  //   if (mirrorFields._2.isEmpty)
+  //     report.throwError(s"Could not find any fields in the type: ${Format.TypeOf[T]}")
+
+  // def summonElaboration[T: Type] =
+  //   val elaboration = ElaborateStructure.Term.ofProduct[T](ElaborationSide.Encoding, udtBehavior = ElaborateStructure.UdtBehavior.Derive)
+  //   if (elaboration.typeType == Leaf)
+  //     report.throwError(s"Error performing filterByKeys for the type: ${Format.TypeOf[T]}. Elaboration was a leaf-type. This should not be possible.")
+  //   elaboration
+
+  // def filterComponents[T: Type] =
+  //   // Check if this is a valid product
+  //   checkValidProduct[T]
+  //   val elaboration = summonElaboration[T]
+  //   // If it is get the components
+  //   val components =
+  //     DeconstructElaboratedEntityLevels.withTerms[T](elaboration).map((term, getter, rawTpe) => {
+  //       val tpe = innerType(rawTpe)
+  //       (term.name, term.optional, getter, tpe)
+  //     })
+
+
+  // TODO use filterComponents instead since it can go into nested objects
   private def recurse[T, PrepareRow, Session, Fields, Types](using Quotes)(id: quotes.reflect.Term, fieldsTup: Type[Fields], typesTup: Type[Types])(eachField: Expr[(String, String) => Boolean], map: Expr[Map[String, String]], default: Expr[String])(using baseType: Type[T], pr: Type[PrepareRow], sess: Type[Session]): Expr[Boolean] = {
     import quotes.reflect._
     (fieldsTup, typesTup) match {
       case ('[field *: fields], '[tpe *: types]) =>
         val unsealedClassSymbol = TypeRepr.of(using baseType).widen.classSymbol
-        //println(s"Symbol: ${unsealedClassSymbol.get.show}")
-        //println(s"Fields: ${unsealedClassSymbol.get.caseFields.map(_.show).toList}")
         // String representing the field being summoned e.g. "firstName" of Person
         val fieldString = Type.of[field].constValue
         // method of the summoned field
         val fieldMethod = unsealedClassSymbol.get.caseFields.filter(field => field.name == fieldString).head
         // 'invocation' of the found method
-        val childTTerm = '{ (${ Select(id, fieldMethod).asExprOf[Any] }).toString }
+        val childTTerm = '{ (${ Select(id, fieldMethod).asExprOf[Any] }) }
         val mapSplice = '{ $map.getOrElse(${Expr[String](fieldString)}, $default) }
+
+        def fieldInject(field: Expr[Any]) =
+          '{ $eachField( $field.toString, ${LiftMacro.apply[String, PrepareRow, Session]( mapSplice )} )}
+
         // construction of the comparison term:
-        // lift(firstName == func(Map[String, String].getOrElse("firstName",null)))
-        val expr = '{
-          $eachField( $childTTerm, ${LiftMacro.apply[String, PrepareRow, Session]( mapSplice )} )
-        }
+        //   lift(firstName == func(Map[String, String].getOrElse("firstName",null)))
+        val expr =
+          Type.of[tpe] match
+            case '[Option[inner]] =>
+              '{ ${childTTerm.asExprOf[Option[inner]]}.exists(field => ${ fieldInject('field) }) }
+            case _ =>
+              fieldInject(childTTerm)
+
         val rec = recurse[T, PrepareRow, Session, fields, types](id, Type.of[fields], Type.of[types])(eachField, map, default)(using baseType)
         '{ $expr && $rec }
 

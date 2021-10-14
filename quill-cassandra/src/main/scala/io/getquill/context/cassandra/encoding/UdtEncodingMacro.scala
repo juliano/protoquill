@@ -186,7 +186,7 @@ object UdtEncodingMacro:
 
     def apply: (UdtParams[T] => Expr[UDTValue], TermType) = {
       val (deconstructedEntityComponents, elaborationType) = udtComponents[T]
-      val ents = deconstructedEntityComponents.map { case (t, o, g, tpe) => s"(${t} --> ${Format.Expr(g)})"}
+      // val ents = deconstructedEntityComponents.map { case (t, o, g, tpe) => s"(${t} --> ${Format.Expr(g)})"}
       //println(s"Components of: ${Format.TypeOf[T]}: ${ents}" )
 
       val udtMaker =
